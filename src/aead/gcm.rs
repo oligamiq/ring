@@ -17,7 +17,7 @@ use super::{aes_gcm, Aad};
 use crate::{
     bits::{BitLength, FromByteLen as _},
     error::{self, InputTooLongError},
-    polyfill::{sliceutil::overwrite_at_start, NotSend},
+    polyfill::{slice, sliceutil::overwrite_at_start, NotSend},
 };
 use cfg_if::cfg_if;
 
@@ -47,13 +47,16 @@ pub(super) struct Context<'key, K> {
     _not_send: NotSend,
 }
 
-impl<'key, K: Gmult> Context<'key, K> {
+impl<'key, K> Context<'key, K> {
     #[inline(always)]
     pub(crate) fn new(
         key: &'key K,
         aad: Aad<&[u8]>,
         in_out_len: usize,
-    ) -> Result<Self, error::Unspecified> {
+    ) -> Result<Self, error::Unspecified>
+    where
+        K: Gmult + UpdateBlocks,
+    {
         if in_out_len > aes_gcm::MAX_IN_OUT_LEN {
             return Err(error::Unspecified);
         }
@@ -74,9 +77,14 @@ impl<'key, K: Gmult> Context<'key, K> {
             _not_send: NotSend::VALUE,
         };
 
-        for ad in aad.0.chunks(BLOCK_LEN) {
+        let (whole, partial) = slice::as_chunks(aad.as_ref());
+        if !whole.is_empty() {
+            // TODO: use `unlikely()` instead of `#[cold]` when available.
+            ctx.update_blocks_cold(whole);
+        }
+        if !partial.is_empty() {
             let mut block = ZERO_BLOCK;
-            overwrite_at_start(&mut block, ad);
+            overwrite_at_start(&mut block, partial);
             ctx.update_block(block);
         }
 
@@ -115,6 +123,12 @@ impl Context<'_, clmulavxmovbe::Key> {
 }
 
 impl<K: UpdateBlocks> Context<'_, K> {
+    #[cold]
+    #[inline(never)]
+    pub fn update_blocks_cold(&mut self, input: &[[u8; BLOCK_LEN]]) {
+        self.update_blocks(input);
+    }
+
     #[inline(always)]
     pub fn update_blocks(&mut self, input: &[[u8; BLOCK_LEN]]) {
         self.key.update_blocks(&mut self.Xi, input);
