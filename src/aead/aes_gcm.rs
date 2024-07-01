@@ -151,7 +151,7 @@ pub(super) fn seal(
                 )
             };
 
-            let ramaining = match in_out.get_mut(processed..) {
+            let in_out = match in_out.get_mut(processed..) {
                 Some(remaining) => remaining,
                 None => {
                     // This can't happen. If it did, then the assembly already
@@ -159,7 +159,7 @@ pub(super) fn seal(
                     unreachable!()
                 }
             };
-            let (whole, remainder) = slice::as_chunks_mut(ramaining);
+            let (whole, remainder) = slice::as_chunks_mut(in_out);
             aes_key.ctr32_encrypt_within(slice::flatten_mut(whole), 0.., &mut ctr);
             auth.update_blocks(whole);
             seal_finish(aes_key, auth, remainder, ctr, tag_iv)
