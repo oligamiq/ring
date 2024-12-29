@@ -14,10 +14,11 @@
 
 use super::{
     aes::{self, Counter, BLOCK_LEN, ZERO_BLOCK},
-    gcm, shift, Aad, InOut, Nonce, Tag,
+    gcm, shift, Aad, InOut, Nonce, OpenError, Tag,
 };
 use crate::{
-    cpu, error,
+    cpu,
+    error::{self, InputTooLongError},
     polyfill::{slice, sliceutil::overwrite_at_start, usize_from_u64_saturated},
 };
 use core::ops::RangeFrom;
@@ -117,7 +118,7 @@ pub(super) fn seal(
     nonce: Nonce,
     aad: Aad<&[u8]>,
     in_out: &mut [u8],
-) -> Result<Tag, error::Unspecified> {
+) -> Result<Tag, InputTooLongError> {
     let mut ctr = Counter::one(nonce);
     let tag_iv = ctr.increment();
 
@@ -162,7 +163,7 @@ pub(super) fn seal(
             let (whole, remainder) = slice::as_chunks_mut(ramaining);
             aes_key.ctr32_encrypt_within(InOut::in_place(slice::flatten_mut(whole)), &mut ctr);
             auth.update_blocks(whole);
-            seal_finish(aes_key, auth, remainder, ctr, tag_iv)
+            Ok(seal_finish(aes_key, auth, remainder, ctr, tag_iv))
         }
 
         #[cfg(target_arch = "aarch64")]
@@ -200,7 +201,7 @@ pub(super) fn seal(
                     )
                 }
             }
-            seal_finish(aes_key, auth, remainder, ctr, tag_iv)
+            Ok(seal_finish(aes_key, auth, remainder, ctr, tag_iv))
         }
 
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -234,7 +235,7 @@ fn seal_strided<A: aes::EncryptBlock + aes::EncryptCtr32, G: gcm::UpdateBlocks +
     in_out: &mut [u8],
     mut ctr: Counter,
     tag_iv: aes::Iv,
-) -> Result<Tag, error::Unspecified> {
+) -> Result<Tag, InputTooLongError> {
     let mut auth = gcm::Context::new(gcm_key, aad, in_out.len())?;
 
     let (whole, remainder) = slice::as_chunks_mut(in_out);
@@ -244,7 +245,7 @@ fn seal_strided<A: aes::EncryptBlock + aes::EncryptCtr32, G: gcm::UpdateBlocks +
         auth.update_blocks(chunk);
     }
 
-    seal_finish(aes_key, auth, remainder, ctr, tag_iv)
+    Ok(seal_finish(aes_key, auth, remainder, ctr, tag_iv))
 }
 
 fn seal_finish<A: aes::EncryptBlock, G: gcm::Gmult>(
@@ -253,7 +254,7 @@ fn seal_finish<A: aes::EncryptBlock, G: gcm::Gmult>(
     remainder: &mut [u8],
     ctr: Counter,
     tag_iv: aes::Iv,
-) -> Result<Tag, error::Unspecified> {
+) -> Tag {
     if !remainder.is_empty() {
         let mut input = ZERO_BLOCK;
         overwrite_at_start(&mut input, remainder);
@@ -263,7 +264,7 @@ fn seal_finish<A: aes::EncryptBlock, G: gcm::Gmult>(
         overwrite_at_start(remainder, &output);
     }
 
-    Ok(finish(aes_key, auth, tag_iv))
+    finish(aes_key, auth, tag_iv)
 }
 
 #[inline(never)]
@@ -273,9 +274,10 @@ pub(super) fn open(
     aad: Aad<&[u8]>,
     in_out_slice: &mut [u8],
     src: RangeFrom<usize>,
-) -> Result<Tag, error::Unspecified> {
+) -> Result<Tag, OpenError> {
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    let in_out = InOut::overlapping(in_out_slice, src.clone())?;
+    let in_out =
+        InOut::overlapping(in_out_slice, src.clone()).map_err(OpenError::src_index_error)?;
 
     let mut ctr = Counter::one(nonce);
     let tag_iv = ctr.increment();
@@ -299,7 +301,8 @@ pub(super) fn open(
             }
 
             let (input, output, len) = in_out.into_input_output_len();
-            let mut auth = gcm::Context::new(gcm_key, aad, len)?;
+            let mut auth =
+                gcm::Context::new(gcm_key, aad, len).map_err(OpenError::input_too_long)?;
             let (htable, xi) = auth.inner();
             let processed = unsafe {
                 aesni_gcm_decrypt(
@@ -331,14 +334,15 @@ pub(super) fn open(
             let whole_len = slice::flatten(whole).len();
 
             // Decrypt any remaining whole blocks.
-            let whole = InOut::overlapping(&mut in_out[..(src.start + whole_len)], src.clone())?;
+            let whole = InOut::overlapping(&mut in_out[..(src.start + whole_len)], src.clone())
+                .map_err(OpenError::src_index_error)?;
             aes_key.ctr32_encrypt_within(whole, &mut ctr);
 
             let in_out = match in_out.get_mut(whole_len..) {
                 Some(partial) => partial,
                 None => unreachable!(),
             };
-            open_finish(aes_key, auth, in_out, src, ctr, tag_iv)
+            Ok(open_finish(aes_key, auth, in_out, src, ctr, tag_iv))
         }
 
         #[cfg(target_arch = "aarch64")]
@@ -347,7 +351,8 @@ pub(super) fn open(
 
             let (input, output, input_len) = in_out.into_input_output_len();
 
-            let mut auth = gcm::Context::new(gcm_key, aad, input_len)?;
+            let mut auth =
+                gcm::Context::new(gcm_key, aad, input_len).map_err(OpenError::input_too_long)?;
 
             let remainder_len = input_len % BLOCK_LEN;
             let whole_len = input_len - remainder_len;
@@ -417,15 +422,16 @@ pub(super) fn open(
 fn open_strided<A: aes::EncryptBlock + aes::EncryptCtr32, G: gcm::UpdateBlocks + gcm::Gmult>(
     Combo { aes_key, gcm_key }: &Combo<A, G>,
     aad: Aad<&[u8]>,
-    in_out: &mut [u8],
+    in_out_slice: &mut [u8],
     src: RangeFrom<usize>,
     mut ctr: Counter,
     tag_iv: aes::Iv,
-) -> Result<Tag, error::Unspecified> {
-    let input = in_out.get(src.clone()).ok_or(error::Unspecified)?;
-    let input_len = input.len();
+) -> Result<Tag, OpenError> {
+    let in_out =
+        InOut::overlapping(in_out_slice, src.clone()).map_err(OpenError::src_index_error)?;
+    let input_len = in_out.len();
 
-    let mut auth = gcm::Context::new(gcm_key, aad, input_len)?;
+    let mut auth = gcm::Context::new(gcm_key, aad, input_len).map_err(OpenError::input_too_long)?;
 
     let remainder_len = input_len % BLOCK_LEN;
     let whole_len = input_len - remainder_len;
@@ -440,7 +446,7 @@ fn open_strided<A: aes::EncryptBlock + aes::EncryptCtr32, G: gcm::UpdateBlocks +
                 chunk_len = whole_len - output;
             }
 
-            let ciphertext = &in_out[input..][..chunk_len];
+            let ciphertext = &in_out_slice[input..][..chunk_len];
             let (ciphertext, leftover) = slice::as_chunks(ciphertext);
             debug_assert_eq!(leftover.len(), 0);
             if ciphertext.is_empty() {
@@ -449,16 +455,24 @@ fn open_strided<A: aes::EncryptBlock + aes::EncryptCtr32, G: gcm::UpdateBlocks +
             auth.update_blocks(ciphertext);
 
             let chunk = InOut::overlapping(
-                &mut in_out[output..][..(chunk_len + in_prefix_len)],
+                &mut in_out_slice[output..][..(chunk_len + in_prefix_len)],
                 in_prefix_len..,
-            )?;
+            )
+            .map_err(OpenError::src_index_error)?;
             aes_key.ctr32_encrypt_within(chunk, &mut ctr);
             output += chunk_len;
             input += chunk_len;
         }
     }
 
-    open_finish(aes_key, auth, &mut in_out[whole_len..], src, ctr, tag_iv)
+    Ok(open_finish(
+        aes_key,
+        auth,
+        &mut in_out_slice[whole_len..],
+        src,
+        ctr,
+        tag_iv,
+    ))
 }
 
 fn open_finish<A: aes::EncryptBlock, G: gcm::Gmult>(
@@ -468,7 +482,7 @@ fn open_finish<A: aes::EncryptBlock, G: gcm::Gmult>(
     src: RangeFrom<usize>,
     ctr: Counter,
     tag_iv: aes::Iv,
-) -> Result<Tag, error::Unspecified> {
+) -> Tag {
     shift::shift_partial((src.start, remainder), |remainder| {
         let mut input = ZERO_BLOCK;
         overwrite_at_start(&mut input, remainder);
@@ -476,7 +490,7 @@ fn open_finish<A: aes::EncryptBlock, G: gcm::Gmult>(
         aes_key.encrypt_iv_xor_block(ctr.into(), input)
     });
 
-    Ok(finish(aes_key, auth, tag_iv))
+    finish(aes_key, auth, tag_iv)
 }
 
 fn finish<A: aes::EncryptBlock, G: gcm::Gmult>(

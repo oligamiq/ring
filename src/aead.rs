@@ -26,6 +26,7 @@ use crate::{
     polyfill::{u64_from_usize, usize_from_u64_saturated},
 };
 
+use self::open_error::OpenError;
 pub use self::{
     algorithm::{Algorithm, AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305},
     less_safe_key::LessSafeKey,
@@ -179,6 +180,7 @@ mod gcm;
 mod inout;
 mod less_safe_key;
 mod nonce;
+mod open_error;
 mod opening_key;
 mod poly1305;
 pub mod quic;

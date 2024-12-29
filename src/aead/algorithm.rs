@@ -12,14 +12,13 @@
 // OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 // CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-use crate::{constant_time, cpu, error, hkdf};
-use core::ops::RangeFrom;
-
 use super::{
     aes, aes_gcm, chacha20_poly1305,
     nonce::{Nonce, NONCE_LEN},
     Aad, KeyInner, Tag, TAG_LEN,
 };
+use crate::{constant_time, cpu, error, hkdf};
+use core::ops::RangeFrom;
 
 impl hkdf::KeyType for &'static Algorithm {
     #[inline]
@@ -193,7 +192,7 @@ fn aes_gcm_seal(
         KeyInner::AesGcm(key) => key,
         _ => unreachable!(),
     };
-    aes_gcm::seal(key, nonce, aad, in_out)
+    aes_gcm::seal(key, nonce, aad, in_out).map_err(error::erase)
 }
 
 pub(super) fn aes_gcm_open(
@@ -208,7 +207,7 @@ pub(super) fn aes_gcm_open(
         KeyInner::AesGcm(key) => key,
         _ => unreachable!(),
     };
-    aes_gcm::open(key, nonce, aad, in_out, src)
+    aes_gcm::open(key, nonce, aad, in_out, src).map_err(error::erase)
 }
 
 /// ChaCha20-Poly1305 as described in [RFC 8439].
