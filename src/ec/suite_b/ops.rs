@@ -13,7 +13,11 @@
 // CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 use crate::{
-    arithmetic::limbs_from_hex, arithmetic::montgomery::*, constant_time::LeakyWord, cpu, error,
+    arithmetic::limbs_from_hex,
+    arithmetic::montgomery::*,
+    constant_time::LeakyWord,
+    cpu,
+    error::{self, LenMismatchError},
     limb::*,
 };
 use core::marker::PhantomData;
@@ -133,7 +137,8 @@ impl<M> Modulus<M> {
             &mut a.limbs[..num_limbs],
             &b.limbs[..num_limbs],
             &self.limbs[..num_limbs],
-        );
+        )
+        .unwrap_or_else(unwrap_impossible_len_mismatch_error)
     }
 }
 
@@ -598,6 +603,12 @@ fn parse_big_endian_fixed_consttime<M>(
         &mut r.limbs[..num_limbs],
     )?;
     Ok(r)
+}
+
+#[cold]
+#[inline(never)]
+fn unwrap_impossible_len_mismatch_error(_: LenMismatchError) {
+    unreachable!()
 }
 
 #[cfg(test)]

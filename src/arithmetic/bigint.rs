@@ -45,7 +45,8 @@ pub(crate) use self::{
 use super::{montgomery::*, LimbSliceError, MAX_LIMBS};
 use crate::{
     bits::BitLength,
-    c, error,
+    c,
+    error::{self, LenMismatchError},
     limb::{self, Limb, LIMB_BITS},
 };
 use alloc::vec;
@@ -235,7 +236,8 @@ pub fn elem_widen<Larger, Smaller>(
 
 // TODO: Document why this works for all Montgomery factors.
 pub fn elem_add<M, E>(mut a: Elem<M, E>, b: Elem<M, E>, m: &Modulus<M>) -> Elem<M, E> {
-    limb::limbs_add_assign_mod(&mut a.limbs, &b.limbs, m.limbs());
+    limb::limbs_add_assign_mod(&mut a.limbs[..], &b.limbs[..], m.limbs())
+        .unwrap_or_else(unwrap_impossible_len_mismatch_error);
     a
 }
 
@@ -721,6 +723,12 @@ pub fn elem_verify_equal_consttime<M, E>(
     } else {
         Err(error::Unspecified)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn unwrap_impossible_len_mismatch_error(_: LenMismatchError) {
+    unreachable!()
 }
 
 #[cold]
