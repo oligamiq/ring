@@ -15,9 +15,9 @@
 
 #![cfg(all(target_arch = "arm", target_endian = "little"))]
 
-use super::{Key, Tag, KEY_LEN, TAG_LEN};
+use super::{Key, Tag, TAG_LEN};
 use crate::{c, cpu::arm::Neon};
-use core::num::NonZeroUsize;
+use core::{mem::MaybeUninit, num::NonZeroUsize};
 
 // XXX/TODO(MSRV): change to `pub(super)`.
 pub(in super::super) struct State {
@@ -33,43 +33,79 @@ struct poly1305_state_st {
     c: fe1305x2,
     precomp: [fe1305x2; 2],
 
-    data: [u8; data_len()],
+    // Not used in C or Rust; assume the assembly code writes to it before it
+    // reads from it.
+    data: MaybeUninit<[u8; 128]>,
 
     buf: [u8; 32],
     buf_used: c::size_t,
     key: [u8; 16],
 }
 
-const fn data_len() -> usize {
-    128
-}
-
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(16))] // align(16) is for ZERO in particular.
 struct fe1305x2 {
     v: [u32; 12], // for alignment; only using 10
 }
 
+impl fe1305x2 {
+    const ZERO: Self = Self { v: [0u32; 12] };
+}
+
 impl State {
-    pub(super) fn new_context(Key { key_and_nonce }: Key, neon: Neon) -> super::Context {
+    pub(super) fn new_context(
+        Key {
+            key_and_nonce: ref key,
+        }: Key,
+        neon: Neon,
+    ) -> super::Context {
         prefixed_extern! {
-            fn CRYPTO_poly1305_init_neon(state: &mut poly1305_state_st, key: &[u8; KEY_LEN]);
+            fn openssl_poly1305_neon2_addmulmod(r: *mut fe1305x2, x: &fe1305x2,
+                y: &fe1305x2, c: &fe1305x2);
         }
+        #[inline(always)]
+        fn load32(key: &[u8; 32], i: usize) -> u32 {
+            let bytes = key[i..][..4].try_into().unwrap();
+            u32::from_le_bytes(bytes)
+        }
+        let rv_01 = 0x3ffffff & load32(key, 0);
+        let rv_23 = 0x3ffff03 & (load32(key, 3) >> 2);
+        let rv_45 = 0x3ffc0ff & (load32(key, 6) >> 4);
+        let rv_67 = 0x3f03fff & (load32(key, 9) >> 6);
+        let rv_89 = 0x00fffff & (load32(key, 12) >> 8);
+        let key = (key[16..]).try_into().unwrap();
+        // TODO: Avoid zeroing `precomp` before initializing it.
         let mut r = Self {
             state: poly1305_state_st {
-                r: fe1305x2 { v: [0; 12] },
-                h: fe1305x2 { v: [0; 12] },
-                c: fe1305x2 { v: [0; 12] },
-                precomp: [fe1305x2 { v: [0; 12] }; 2],
-
-                data: [0u8; data_len()],
-                buf: Default::default(),
+                r: fe1305x2 {
+                    v: [
+                        rv_01, rv_01, rv_23, rv_23, rv_45, rv_45, rv_67, rv_67, rv_89, rv_89, 0, 0,
+                    ],
+                },
+                h: fe1305x2::ZERO,
+                c: fe1305x2::ZERO,
+                precomp: [fe1305x2::ZERO; 2],
+                data: MaybeUninit::uninit(),
+                buf: [0u8; 32],
                 buf_used: 0,
-                key: [0u8; 16],
+                key,
             },
             neon,
         };
-        unsafe { CRYPTO_poly1305_init_neon(&mut r.state, &key_and_nonce) }
+
+        // r^2
+        {
+            let precomp0 = &mut r.state.precomp[0];
+            let r = &r.state.r;
+            unsafe { openssl_poly1305_neon2_addmulmod(precomp0, r, r, &fe1305x2::ZERO) };
+        }
+        // r^4
+        {
+            let [ref precomp0, ref mut precomp1] = &mut r.state.precomp;
+            unsafe {
+                openssl_poly1305_neon2_addmulmod(precomp1, precomp0, precomp0, &fe1305x2::ZERO)
+            };
+        }
         super::Context::ArmNeon(r)
     }
 

@@ -856,7 +856,6 @@ fn prefix_all_symbols(pp: char, prefix_prefix: &str, prefix: &str) -> String {
         "CRYPTO_poly1305_finish",
         "CRYPTO_poly1305_finish_neon",
         "CRYPTO_poly1305_init",
-        "CRYPTO_poly1305_init_neon",
         "CRYPTO_poly1305_update",
         "CRYPTO_poly1305_update_neon",
         "ChaCha20_ctr32",
