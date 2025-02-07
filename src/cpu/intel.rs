@@ -92,9 +92,10 @@ fn cpuid_to_caps_and_set_c_flags(cpuid: &[u32; 4]) -> u32 {
 
     let mut caps = 0;
 
-    if check(cpuid, 0, 24) {
-        set(&mut caps, Shift::Fxsr);
-    }
+    // All non-SIMD features should be detected first. Then all SIMD features
+    // according to generation (XMM first, then SSE, then SSE2, etc.), then by
+    // SIMD register size (128-bit first, 256-bit next, then 512-bit, etc.).
+    // Within each section, sort by word index and then bit within word.
 
     // Synthesized.
     #[cfg(target_arch = "x86_64")]
@@ -102,45 +103,14 @@ fn cpuid_to_caps_and_set_c_flags(cpuid: &[u32; 4]) -> u32 {
         set(&mut caps, Shift::IntelCpu);
     }
 
-    if check(cpuid, 1, 1) {
-        set(&mut caps, Shift::ClMul);
-    }
-
-    if check(cpuid, 1, 9) {
-        set(&mut caps, Shift::Ssse3);
-    }
-
-    if check(cpuid, 1, 19) {
-        set(&mut caps, Shift::Sse41);
-    }
-
     #[cfg(target_arch = "x86_64")]
     if check(cpuid, 1, 22) {
         set(&mut caps, Shift::Movbe);
     }
 
-    if check(cpuid, 1, 25) {
-        set(&mut caps, Shift::Aes);
-    }
-
-    if check(cpuid, 1, 28) {
-        set(&mut caps, Shift::Avx);
-    }
-
     #[cfg(target_arch = "x86_64")]
     if check(cpuid, 2, 3) {
         set(&mut caps, Shift::Bmi1);
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    if check(cpuid, 2, 5) {
-        set(&mut caps, Shift::Avx2);
-
-        prefixed_extern! {
-            static avx2_available: AtomicU32;
-        }
-        let flag = unsafe { &avx2_available };
-        flag.store(1, core::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -163,11 +133,53 @@ fn cpuid_to_caps_and_set_c_flags(cpuid: &[u32; 4]) -> u32 {
         }
     }
 
+    // The preceding do not require (or denote) the ability to access any SIMD
+    // registers.
+
+    if !check(cpuid, 0, 24) {
+        set(&mut caps, Shift::Fxsr);
+    }
+
+    // The following require 128-bit or wider SIMD registers.
+
+    if check(cpuid, 1, 1) {
+        set(&mut caps, Shift::ClMul);
+    }
+
+    if check(cpuid, 1, 9) {
+        set(&mut caps, Shift::Ssse3);
+    }
+
+    if check(cpuid, 1, 19) {
+        set(&mut caps, Shift::Sse41);
+    }
+
+    if check(cpuid, 1, 25) {
+        set(&mut caps, Shift::Aes);
+    }
+
+    if check(cpuid, 1, 28) {
+        set(&mut caps, Shift::Avx);
+    }
+
     // See BoringSSL 69c26de93c82ad98daecaec6e0c8644cdf74b03f before enabling
     // static feature detection for this.
     #[cfg(target_arch = "x86_64")]
     if check(cpuid, 2, 29) {
         set(&mut caps, Shift::Sha);
+    }
+
+    // The following require 256-bit or wider SIMD registers.
+
+    #[cfg(target_arch = "x86_64")]
+    if check(cpuid, 2, 5) {
+        set(&mut caps, Shift::Avx2);
+
+        prefixed_extern! {
+            static avx2_available: AtomicU32;
+        }
+        let flag = unsafe { &avx2_available };
+        flag.store(1, core::sync::atomic::Ordering::Relaxed);
     }
 
     caps
